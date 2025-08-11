@@ -30,10 +30,15 @@ app.use(rateLimit({
   message: 'Too many requests, please try again later'
 }));
 
-// Database setup with corrected URL
+// Database setup with SSL enforcement
 const pool = new Pool({
   connectionString: "postgresql://postgres:CKibAkgFLDAKSoxhxNdSnsMsgTkCLFmG@turntable.proxy.rlwy.net:29295/railway",
-  ssl: { rejectUnauthorized: false }
+  ssl: {
+    rejectUnauthorized: false,
+    require: true  // Enforce SSL connection
+  },
+  connectionTimeoutMillis: 5000,  // Fail fast on connection issues
+  idleTimeoutMillis: 30000
 });
 
 // Telegram client setup
@@ -69,21 +74,31 @@ const client = new TelegramClient(
   }
 })();
 
-// Initialize database
-(async () => {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS requests (
-        id SERIAL PRIMARY KEY,
-        message TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT NOW()
-      );
-    `);
-    console.log('Database initialized');
-  } catch (err) {
-    console.error('Database init error:', err);
+// Initialize database with retry logic
+const initializeDatabase = async () => {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS requests (
+          id SERIAL PRIMARY KEY,
+          message TEXT NOT NULL,
+          created_at TIMESTAMP DEFAULT NOW()
+        );
+      `);
+      console.log('Database initialized');
+      return;
+    } catch (err) {
+      console.error(`Database init error (attempt ${attempt}):`, err);
+      if (attempt === 3) {
+        console.error('Fatal database initialization failure');
+        process.exit(1);
+      }
+      await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
+    }
   }
-})();
+};
+
+initializeDatabase();
 
 // API endpoint to send messages
 app.post('/api/send', async (req, res) => {
@@ -116,6 +131,11 @@ app.post('/api/send', async (req, res) => {
     // Handle specific Telegram errors
     if (error.message.includes('AUTH_KEY_UNREGISTERED')) {
       return res.status(500).json({ error: 'Invalid Telegram session. Contact support.' });
+    }
+    
+    // Handle database connection issues
+    if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
+      return res.status(503).json({ error: 'Database unavailable. Try again later.' });
     }
     
     res.status(500).json({ error: 'Failed to send message' });
