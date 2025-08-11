@@ -30,15 +30,24 @@ app.use(rateLimit({
   message: 'Too many requests, please try again later'
 }));
 
-// Database setup with SSL enforcement
-const pool = new Pool({
+// Database setup with enhanced configuration
+const poolConfig = {
   connectionString: "postgresql://postgres:CKibAkgFLDAKSoxhxNdSnsMsgTkCLFmG@turntable.proxy.rlwy.net:29295/railway",
   ssl: {
     rejectUnauthorized: false,
-    require: true  // Enforce SSL connection
+    require: true
   },
-  connectionTimeoutMillis: 5000,  // Fail fast on connection issues
-  idleTimeoutMillis: 30000
+  connectionTimeoutMillis: 10000,  // Increased timeout to 10s
+  idleTimeoutMillis: 60000,        // Increased idle timeout
+  max: 10,                         // Limit connection pool size
+  allowExitOnIdle: true
+};
+
+const pool = new Pool(poolConfig);
+
+// Add keep-alive to prevent connection resets
+pool.on('connect', (client) => {
+  client.connection.stream.setKeepAlive(true, 60000); // 60s keep-alive
 });
 
 // Telegram client setup
@@ -52,7 +61,8 @@ const client = new TelegramClient(
   {
     connectionRetries: 5,
     useWSS: true,
-    baseLogger: console
+    baseLogger: console,
+    autoReconnect: true
   }
 );
 
@@ -70,14 +80,19 @@ const client = new TelegramClient(
     }, new UpdateConnectionState(UpdateConnectionState.disconnected));
   } catch (err) {
     console.error('Telegram connection error:', err);
-    process.exit(1);
   }
 })();
 
-// Initialize database with retry logic
-const initializeDatabase = async () => {
-  for (let attempt = 1; attempt <= 3; attempt++) {
+// Database initialization with robust retry logic
+const initializeDatabase = async (maxAttempts = 5) => {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
+      console.log(`Database initialization attempt ${attempt}/${maxAttempts}`);
+      
+      // Test connection first
+      await pool.query('SELECT NOW() as current_time');
+      
+      // Create table if needed
       await pool.query(`
         CREATE TABLE IF NOT EXISTS requests (
           id SERIAL PRIMARY KEY,
@@ -85,22 +100,36 @@ const initializeDatabase = async () => {
           created_at TIMESTAMP DEFAULT NOW()
         );
       `);
-      console.log('Database initialized');
-      return;
+      
+      console.log('Database initialized successfully');
+      return true;
     } catch (err) {
-      console.error(`Database init error (attempt ${attempt}):`, err);
-      if (attempt === 3) {
+      console.error(`Database init error (attempt ${attempt}):`, err.message);
+      
+      if (attempt === maxAttempts) {
         console.error('Fatal database initialization failure');
-        process.exit(1);
+        return false;
       }
-      await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
+      
+      // Exponential backoff with jitter
+      const baseDelay = Math.pow(2, attempt) * 1000;
+      const jitter = Math.random() * 1000;
+      const delay = Math.min(baseDelay + jitter, 30000);
+      
+      console.log(`Retrying in ${Math.round(delay/1000)} seconds...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
 };
 
-initializeDatabase();
+// Start database initialization but don't block server startup
+initializeDatabase().then(success => {
+  if (!success) {
+    console.warn('Proceeding without database initialization. Some features may not work.');
+  }
+});
 
-// API endpoint to send messages
+// API endpoint to send messages with database fallback
 app.post('/api/send', async (req, res) => {
   let { message } = req.body;
   
@@ -113,11 +142,15 @@ app.post('/api/send', async (req, res) => {
   message = message.trim().substring(0, 500);
 
   try {
-    // Save to database
-    await pool.query(
-      `INSERT INTO requests (message) VALUES ($1)`,
-      [message]
-    );
+    // Try to save to database (if available)
+    try {
+      await pool.query(
+        `INSERT INTO requests (message) VALUES ($1)`,
+        [message]
+      );
+    } catch (dbError) {
+      console.error('Database save error (proceeding to Telegram):', dbError.message);
+    }
 
     // Send to Telegram
     await client.sendMessage(process.env.BOT_USERNAME, {
@@ -133,32 +166,26 @@ app.post('/api/send', async (req, res) => {
       return res.status(500).json({ error: 'Invalid Telegram session. Contact support.' });
     }
     
-    // Handle database connection issues
-    if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
-      return res.status(503).json({ error: 'Database unavailable. Try again later.' });
-    }
-    
     res.status(500).json({ error: 'Failed to send message' });
   }
 });
 
-// Improved health check
+// Improved health check with database verification
 app.get('/health', async (req, res) => {
   try {
     // Test database connection
-    await pool.query('SELECT 1');
+    const dbResult = await pool.query('SELECT NOW() as time').catch(() => null);
     
     res.json({
       status: 'ok',
       telegram: client.connected ? 'connected' : 'disconnected',
-      database: 'operational'
+      database: dbResult ? 'operational' : 'degraded'
     });
   } catch (err) {
     res.status(500).json({
       status: 'unhealthy',
       telegram: client.connected ? 'connected' : 'disconnected',
-      database: 'down',
-      error: err.message
+      database: 'unavailable'
     });
   }
 });
@@ -170,20 +197,37 @@ const server = app.listen(port, () => {
 });
 
 // Graceful shutdown handling
-process.on('SIGTERM', () => {
+const shutdown = async () => {
   console.log('Shutting down gracefully...');
   
   server.close(async () => {
     console.log('HTTP server closed');
     
-    // Close database pool
-    await pool.end();
-    console.log('Database connections closed');
+    try {
+      // Close database pool
+      await pool.end();
+      console.log('Database connections closed');
+    } catch (err) {
+      console.error('Error closing database pool:', err);
+    }
     
-    // Disconnect Telegram client
-    await client.disconnect();
-    console.log('Telegram client disconnected');
+    try {
+      // Disconnect Telegram client
+      await client.disconnect();
+      console.log('Telegram client disconnected');
+    } catch (err) {
+      console.error('Error disconnecting Telegram client:', err);
+    }
     
     process.exit(0);
   });
-});
+  
+  // Force shutdown after timeout
+  setTimeout(() => {
+    console.error('Forcing shutdown after timeout');
+    process.exit(1);
+  }, 10000);
+};
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
