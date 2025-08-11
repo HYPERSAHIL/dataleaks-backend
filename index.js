@@ -12,7 +12,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // Validate environment variables
-const requiredEnv = ['API_ID', 'API_HASH', 'SESSION_STRING', 'BOT_USERNAME', 'DATABASE_URL', 'FRONTEND_URL'];
+const requiredEnv = ['API_ID', 'API_HASH', 'SESSION_STRING', 'BOT_USERNAME', 'FRONTEND_URL'];
 requiredEnv.forEach(env => {
   if (!process.env[env]) {
     console.error(`Missing required environment variable: ${env}`);
@@ -30,24 +30,26 @@ app.use(rateLimit({
   message: 'Too many requests, please try again later'
 }));
 
-// Database setup with enhanced configuration
-const poolConfig = {
-  connectionString: "postgresql://postgres:CKibAkgFLDAKSoxhxNdSnsMsgTkCLFmG@turntable.proxy.rlwy.net:29295/railway",
+// Database setup using Railway's internal connection
+const pool = new Pool({
+  user: process.env.PGUSER || 'postgres',
+  password: process.env.POSTGRES_PASSWORD,
+  host: process.env.PGHOST || 'postgres.railway.internal',
+  database: process.env.PGDATABASE || 'railway',
+  port: process.env.PGPORT || 5432,
   ssl: {
     rejectUnauthorized: false,
     require: true
   },
-  connectionTimeoutMillis: 10000,  // Increased timeout to 10s
-  idleTimeoutMillis: 60000,        // Increased idle timeout
-  max: 10,                         // Limit connection pool size
+  connectionTimeoutMillis: 10000,
+  idleTimeoutMillis: 60000,
+  max: 10,
   allowExitOnIdle: true
-};
-
-const pool = new Pool(poolConfig);
+});
 
 // Add keep-alive to prevent connection resets
 pool.on('connect', (client) => {
-  client.connection.stream.setKeepAlive(true, 60000); // 60s keep-alive
+  client.connection.stream.setKeepAlive(true, 60000);
 });
 
 // Telegram client setup
@@ -90,7 +92,8 @@ const initializeDatabase = async (maxAttempts = 5) => {
       console.log(`Database initialization attempt ${attempt}/${maxAttempts}`);
       
       // Test connection first
-      await pool.query('SELECT NOW() as current_time');
+      const res = await pool.query('SELECT NOW() as current_time');
+      console.log(`Database connection successful at ${res.rows[0].current_time}`);
       
       // Create table if needed
       await pool.query(`
