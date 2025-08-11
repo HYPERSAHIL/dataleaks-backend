@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
-const { TelegramClient } = require('gramjs');
-const { StringSession } = require('gramjs/sessions');
+const { TelegramClient } = require('telegram');
+const { StringSession } = require('telegram/sessions');
 const { Pool } = require('pg');
 const helmet = require('helmet');
 const cors = require('cors');
