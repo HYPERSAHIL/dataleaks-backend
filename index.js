@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
+const { UpdateConnectionState } = require('telegram/network');
 const { Pool } = require('pg');
 const helmet = require('helmet');
 const cors = require('cors');
@@ -9,6 +10,15 @@ const rateLimit = require('express-rate-limit');
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+// Validate environment variables
+const requiredEnv = ['API_ID', 'API_HASH', 'SESSION_STRING', 'BOT_USERNAME', 'DATABASE_URL', 'FRONTEND_URL'];
+requiredEnv.forEach(env => {
+  if (!process.env[env]) {
+    console.error(`Missing required environment variable: ${env}`);
+    process.exit(1);
+  }
+});
 
 // Security middleware
 app.use(helmet());
@@ -20,9 +30,9 @@ app.use(rateLimit({
   message: 'Too many requests, please try again later'
 }));
 
-// Database setup
+// Database setup with corrected URL
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: "postgresql://postgres:CKibAkgFLDAKSoxhxNdSnsMsgTkCLFmG@turntable.proxy.rlwy.net:29295/railway",
   ssl: { rejectUnauthorized: false }
 });
 
@@ -48,11 +58,11 @@ const client = new TelegramClient(
     await client.connect();
     console.log('Telegram client connected successfully!');
     
-    // Verify connection
-    if (!client.connected) {
-      console.error('Telegram connection failed');
-      process.exit(1);
-    }
+    // Add auto-reconnect handler
+    client.addEventHandler(() => {
+      console.log('Telegram disconnected! Attempting reconnect...');
+      client.connect();
+    }, new UpdateConnectionState(UpdateConnectionState.disconnected));
   } catch (err) {
     console.error('Telegram connection error:', err);
     process.exit(1);
@@ -77,12 +87,15 @@ const client = new TelegramClient(
 
 // API endpoint to send messages
 app.post('/api/send', async (req, res) => {
-  const { message } = req.body;
+  let { message } = req.body;
   
   // Input validation
-  if (!message || typeof message !== 'string' || message.length > 500) {
-    return res.status(400).json({ error: 'Invalid message' });
+  if (!message || typeof message !== 'string') {
+    return res.status(400).json({ error: 'Invalid message format' });
   }
+
+  // Sanitize and trim message
+  message = message.trim().substring(0, 500);
 
   try {
     // Save to database
@@ -99,21 +112,58 @@ app.post('/api/send', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error('Error sending message:', error);
+    
+    // Handle specific Telegram errors
+    if (error.message.includes('AUTH_KEY_UNREGISTERED')) {
+      return res.status(500).json({ error: 'Invalid Telegram session. Contact support.' });
+    }
+    
     res.status(500).json({ error: 'Failed to send message' });
   }
 });
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    telegram: client.connected ? 'connected' : 'disconnected',
-    database: 'operational'
-  });
+// Improved health check
+app.get('/health', async (req, res) => {
+  try {
+    // Test database connection
+    await pool.query('SELECT 1');
+    
+    res.json({
+      status: 'ok',
+      telegram: client.connected ? 'connected' : 'disconnected',
+      database: 'operational'
+    });
+  } catch (err) {
+    res.status(500).json({
+      status: 'unhealthy',
+      telegram: client.connected ? 'connected' : 'disconnected',
+      database: 'down',
+      error: err.message
+    });
+  }
 });
 
-// Start server
-app.listen(port, () => {
+// Start server with graceful shutdown
+const server = app.listen(port, () => {
   console.log(`Server running on port ${port}`);
   console.log(`Frontend URL: ${process.env.FRONTEND_URL}`);
+});
+
+// Graceful shutdown handling
+process.on('SIGTERM', () => {
+  console.log('Shutting down gracefully...');
+  
+  server.close(async () => {
+    console.log('HTTP server closed');
+    
+    // Close database pool
+    await pool.end();
+    console.log('Database connections closed');
+    
+    // Disconnect Telegram client
+    await client.disconnect();
+    console.log('Telegram client disconnected');
+    
+    process.exit(0);
+  });
 });
