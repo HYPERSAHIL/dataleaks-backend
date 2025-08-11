@@ -32,24 +32,15 @@ app.use(rateLimit({
 
 // Database setup using Railway's internal connection
 const pool = new Pool({
-  user: process.env.PGUSER || 'postgres',
-  password: process.env.POSTGRES_PASSWORD,
-  host: process.env.PGHOST || 'postgres.railway.internal',
-  database: process.env.PGDATABASE || 'railway',
-  port: process.env.PGPORT || 5432,
-  ssl: {
-    rejectUnauthorized: false,
-    require: true
-  },
-  connectionTimeoutMillis: 10000,
-  idleTimeoutMillis: 60000,
-  max: 10,
+  user: 'postgres',
+  password: 'CKibAkgFLDAKSoxhxNdSnsMsgTkCLFmG',
+  host: 'postgres.railway.internal',
+  database: 'railway',
+  port: 5432,
+  connectionTimeoutMillis: 5000,  // Shorter timeout
+  idleTimeoutMillis: 30000,
+  max: 5,                         // Smaller pool size
   allowExitOnIdle: true
-});
-
-// Add keep-alive to prevent connection resets
-pool.on('connect', (client) => {
-  client.connection.stream.setKeepAlive(true, 60000);
 });
 
 // Telegram client setup
@@ -85,54 +76,25 @@ const client = new TelegramClient(
   }
 })();
 
-// Database initialization with robust retry logic
-const initializeDatabase = async (maxAttempts = 5) => {
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      console.log(`Database initialization attempt ${attempt}/${maxAttempts}`);
-      
-      // Test connection first
-      const res = await pool.query('SELECT NOW() as current_time');
-      console.log(`Database connection successful at ${res.rows[0].current_time}`);
-      
-      // Create table if needed
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS requests (
-          id SERIAL PRIMARY KEY,
-          message TEXT NOT NULL,
-          created_at TIMESTAMP DEFAULT NOW()
-        );
-      `);
-      
-      console.log('Database initialized successfully');
-      return true;
-    } catch (err) {
-      console.error(`Database init error (attempt ${attempt}):`, err.message);
-      
-      if (attempt === maxAttempts) {
-        console.error('Fatal database initialization failure');
-        return false;
-      }
-      
-      // Exponential backoff with jitter
-      const baseDelay = Math.pow(2, attempt) * 1000;
-      const jitter = Math.random() * 1000;
-      const delay = Math.min(baseDelay + jitter, 30000);
-      
-      console.log(`Retrying in ${Math.round(delay/1000)} seconds...`);
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
-  }
-};
-
-// Start database initialization but don't block server startup
-initializeDatabase().then(success => {
-  if (!success) {
+// Database initialization
+(async () => {
+  try {
+    console.log('Initializing database...');
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS requests (
+        id SERIAL PRIMARY KEY,
+        message TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log('Database initialized successfully');
+  } catch (err) {
+    console.error('Database init error:', err.message);
     console.warn('Proceeding without database initialization. Some features may not work.');
   }
-});
+})();
 
-// API endpoint to send messages with database fallback
+// API endpoint to send messages
 app.post('/api/send', async (req, res) => {
   let { message } = req.body;
   
@@ -145,14 +107,14 @@ app.post('/api/send', async (req, res) => {
   message = message.trim().substring(0, 500);
 
   try {
-    // Try to save to database (if available)
+    // Save to database if possible
     try {
       await pool.query(
         `INSERT INTO requests (message) VALUES ($1)`,
         [message]
       );
     } catch (dbError) {
-      console.error('Database save error (proceeding to Telegram):', dbError.message);
+      console.error('Database save error:', dbError.message);
     }
 
     // Send to Telegram
@@ -173,16 +135,18 @@ app.post('/api/send', async (req, res) => {
   }
 });
 
-// Improved health check with database verification
+// Health check endpoint
 app.get('/health', async (req, res) => {
   try {
     // Test database connection
-    const dbResult = await pool.query('SELECT NOW() as time').catch(() => null);
+    const dbStatus = await pool.query('SELECT 1')
+      .then(() => 'operational')
+      .catch(() => 'degraded');
     
     res.json({
       status: 'ok',
       telegram: client.connected ? 'connected' : 'disconnected',
-      database: dbResult ? 'operational' : 'degraded'
+      database: dbStatus
     });
   } catch (err) {
     res.status(500).json({
@@ -193,43 +157,29 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// Start server with graceful shutdown
+// Start server
 const server = app.listen(port, () => {
   console.log(`Server running on port ${port}`);
   console.log(`Frontend URL: ${process.env.FRONTEND_URL}`);
 });
 
-// Graceful shutdown handling
-const shutdown = async () => {
+// Graceful shutdown
+const shutdown = () => {
   console.log('Shutting down gracefully...');
   
-  server.close(async () => {
+  server.close(() => {
     console.log('HTTP server closed');
     
-    try {
-      // Close database pool
-      await pool.end();
+    pool.end(() => {
       console.log('Database connections closed');
-    } catch (err) {
-      console.error('Error closing database pool:', err);
-    }
-    
-    try {
-      // Disconnect Telegram client
-      await client.disconnect();
-      console.log('Telegram client disconnected');
-    } catch (err) {
-      console.error('Error disconnecting Telegram client:', err);
-    }
-    
-    process.exit(0);
+      process.exit(0);
+    });
   });
-  
-  // Force shutdown after timeout
+
   setTimeout(() => {
     console.error('Forcing shutdown after timeout');
     process.exit(1);
-  }, 10000);
+  }, 5000);
 };
 
 process.on('SIGTERM', shutdown);
