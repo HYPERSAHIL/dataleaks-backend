@@ -1,8 +1,0 @@
-services:
-  - type: web
-    name: leakos-wrapper
-    env: python
-    plan: free
-    # repo: set when creating service in Render UI, or fill: https://github.com/<user>/<repo>
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:$PORT --log-level info
