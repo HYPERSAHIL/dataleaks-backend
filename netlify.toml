@@ -1,0 +1,7 @@
+[build]
+  publish = "."
+  functions = "netlify/functions"
+  command = "pip install -r netlify/functions/requirements.txt"
+
+[functions]
+  python_version = "3.10"
