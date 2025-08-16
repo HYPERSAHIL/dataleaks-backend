@@ -1,11 +1,11 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
+  <meta charset="UTF-8" />
   <title>Dataleaks API Tester</title>
   <style>
     body { font-family: sans-serif; margin: 2em; }
-    textarea, input, select { width: 100%; max-width: 400px; }
+    input, select { width: 100%; max-width: 400px; margin-bottom: 1em; }
     pre { background: #f7f7f7; padding: 1em; border-radius: 6px; }
     .result { margin-top: 2em; }
     label { font-weight: bold; }
@@ -15,25 +15,21 @@
 <body>
   <h1>Dataleaks Backend API Tester</h1>
   <form id="apiForm">
-    <label for="query">Enter Query:</label><br>
+    <label for="query">Enter Query (phone number):</label><br>
     <input type="text" id="query" name="query" required>
-    <br><br>
     <label for="limit">Limit:</label><br>
     <input type="number" id="limit" name="limit" value="100" min="1" max="1000">
-    <br><br>
     <label for="lang">Language:</label><br>
     <select id="lang" name="lang">
       <option value="en">English</option>
       <option value="ru">Russian</option>
       <option value="es">Spanish</option>
     </select>
-    <br><br>
     <label for="type">Type:</label><br>
     <select id="type" name="type">
       <option value="json">JSON</option>
       <option value="text">Text</option>
     </select>
-    <br>
     <button type="submit">Send Query</button>
   </form>
 
@@ -47,17 +43,13 @@
       const lang = document.getElementById('lang').value;
       const type = document.getElementById('type').value;
       const resultDiv = document.getElementById('result');
-
       resultDiv.innerHTML = "Loading...";
-
       try {
         const response = await fetch('/.netlify/functions/query', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({query, limit, lang, type})
         });
-
-        // Defensive: Try to parse as JSON, else show raw text
         const text = await response.text();
         let data;
         try {
@@ -66,7 +58,6 @@
           resultDiv.innerHTML = `<pre style="color:red;">Response was not valid JSON:<br>${text}</pre>`;
           return;
         }
-
         if (data.error) {
           resultDiv.innerHTML = `<pre style="color:red;">Error: ${data.error}${data.detail ? "\nDetails: " + data.detail : ""}</pre>`;
         } else {
